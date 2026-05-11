@@ -11,8 +11,10 @@ Living handoff document for incremental implementation. Update it as phases land
 - `SmokeTest` (verifies config loads).
 - `mvn clean package` green; shaded jar at `target/accumulo-rfile-migration-1.0.0-SNAPSHOT-shaded.jar`.
 - **Phase 1 — UT-6 ArchUnit rule** (`src/test/java/org/example/poc/migration/transform/ClientBypassArchTest.java`). Two rules scoped to `org.example.poc.migration.transform..`: forbids any dependency on `org.apache.accumulo.core.client..` / `clientImpl..`, and (defense-in-depth) bans the four named types `Scanner`/`BatchScanner`/`BatchWriter`/`AccumuloClient` by FQN. Uses `ImportOption.DoNotIncludeJars` so it does not try to import Spark/Hadoop jars. `allowEmptyShould(true)` so it passes vacuously while `transform/` is empty. Verified to bite: a throwaway class importing `AccumuloClient` failed both rules with a clear diagnostic before being removed.
+- **Phase 2 — Domain types + util.** `data/Event.java` (8-field record), `data/EventSerializer.java` (Jackson; `SORT_PROPERTIES_ALPHABETICALLY` + `ORDER_MAP_ENTRIES_BY_KEYS` for NFR-3 byte-stability), `util/KeyUtils.java` (`pad(long)` → 19-char `%019d`, `reverseTs(long)` = `pad(MAX_LONG - ts)`, `yyyyMMdd(long)` UTC-locked via `DateTimeFormatter.withZone(ZoneOffset.UTC)`), `util/Hashing.java` (`sha256`, `sha256Hex`, `hashSortedList` — sort + `\n`-join + SHA-256 for CC-4). Tests: `KeyUtilsTest` (UT-3 + width/UTC invariants, 8 tests), `EventSerializerTest` (object round-trip, alphabetical key order check, byte-stable round-trip from canonical JSON, repeat-serialize byte-identical — 4 tests), `HashingTest` (known-vector SHA-256 for `""` and `"abc"`, order-insensitivity, newline-join contract, empty-list fixed value, 32-byte length — 8 tests). `mvn clean test` green: 23 tests, 0 failures.
+- **Phase 3 — EventTransformer (1→7 fan-out).** `transform/TargetEntry.java` (record `(String targetTable, Key key, Value value)` — uses only `org.apache.accumulo.core.data.*`, no client deps) and `transform/EventTransformer.java` (pure `transform(Key, Value) → List<TargetEntry>` implementing the data-model §5 rule table verbatim). Every produced Key carries `sourceKey.getTimestamp()` (architecture §5.4), never `event.timestamp` or `now()`. Re-serializes the event JSON for the `events_by_id` value through `EventSerializer` so non-canonical source bytes are normalized — keeps NFR-3 byte-identity invariant of input encoding. Tests in `EventTransformerTest`: UT-1 (fan-out: exactly 7, distributed 1/1/1/3/1), UT-2 (byte-for-byte idempotency across two invocations), source-timestamp-preserved (fixture uses `SOURCE_TS` ≠ `event.timestamp` to make the bug visible if the wrong ts leaks through), rowId/CF/CQ contract per §5 for all 5 target tables, and a defensive test that the `events_by_id` value is canonical re-serialization (not source pass-through). UT-6 still green: nothing in `transform/` imports `accumulo.core.client..` (only `accumulo.core.data.Key`/`Value`). `mvn clean test` green: 28 tests, 0 failures.
 
-**⏳ Not yet implemented** — phases 2–13. Components `EnvironmentSetup`, `DatasetGenerator`, `SourceRFileLocator`, `MigrationJob`, `EventTransformer`, `TargetTablePartitioner`, `BulkImporter`, `ConsistencyVerifier`, `SourceCleaner`, `WaveOrchestrator` still do not exist as source files.
+**⏳ Not yet implemented** — phases 4–13. Components `EnvironmentSetup`, `DatasetGenerator`, `SourceRFileLocator`, `MigrationJob`, `TargetTablePartitioner`, `RFileIO`, `BulkImporter`, `ConsistencyVerifier`, `SourceCleaner`, `WaveOrchestrator` still do not exist as source files.
 
 ## Decisions locked in by the scaffold
 
@@ -60,7 +62,7 @@ class ClientBypassArchTest {
 
 ---
 
-### Phase 2 — Domain types + util
+### Phase 2 — Domain types + util ✅
 
 **Goal:** pure-Java building blocks with no Accumulo/Spark dependencies. Fast to test.
 
@@ -78,7 +80,7 @@ class ClientBypassArchTest {
 
 ---
 
-### Phase 3 — EventTransformer (the 1→7 fan-out)
+### Phase 3 — EventTransformer (the 1→7 fan-out) ✅
 
 **Goal:** the core transformation rule from data-model §5. Pure function from one source `KeyValue` to seven `(targetTable, Key, Value)` tuples.
 
