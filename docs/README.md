@@ -11,6 +11,7 @@ This is the complete documentation for the Accumulo data migration PoC, which de
 | 3 | [03-architecture.md](./03-architecture.md) | Components, data flow, **Spark vs MapReduce** comparison with rationale, design choices, risks |
 | 4 | [04-test-plan.md](./04-test-plan.md) | Unit tests, integration tests, consistency checks, report format |
 | 5 | [05-runbook.md](./05-runbook.md) | Build, execution, result interpretation, troubleshooting |
+| 6 | [06-implementation-plan.md](./06-implementation-plan.md) | Living phase-by-phase implementation plan; handoff doc for future Claude sessions |
 
 ## How to Use This Documentation
 
