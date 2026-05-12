@@ -33,8 +33,24 @@
 
         <maven.compiler.plugin.version>3.11.0</maven.compiler.plugin.version>
         <maven.surefire.plugin.version>3.2.2</maven.surefire.plugin.version>
+        <maven.failsafe.plugin.version>3.2.2</maven.failsafe.plugin.version>
         <maven.shade.plugin.version>3.5.1</maven.shade.plugin.version>
         <main.class>org.example.poc.migration.orchestrate.PoCMain</main.class>
+
+        <!--
+          Shared by Surefire and Failsafe. Accumulo/Hadoop reflect into JDK internals and
+          need these opens on JDK 17 or later; the same set is what the runbook expects.
+        -->
+        <test.argLine>--add-opens=java.base/java.lang=ALL-UNNAMED
+                      --add-opens=java.base/java.lang.invoke=ALL-UNNAMED
+                      --add-opens=java.base/java.lang.reflect=ALL-UNNAMED
+                      --add-opens=java.base/java.io=ALL-UNNAMED
+                      --add-opens=java.base/java.net=ALL-UNNAMED
+                      --add-opens=java.base/java.nio=ALL-UNNAMED
+                      --add-opens=java.base/java.util=ALL-UNNAMED
+                      --add-opens=java.base/java.util.concurrent=ALL-UNNAMED
+                      --add-opens=java.base/sun.nio.ch=ALL-UNNAMED
+                      --add-opens=java.base/sun.security.action=ALL-UNNAMED</test.argLine>
     </properties>
 
     <dependencyManagement>
@@ -136,19 +152,25 @@
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>${maven.surefire.plugin.version}</version>
                 <configuration>
-                    <argLine>
-                        --add-opens=java.base/java.lang=ALL-UNNAMED
-                        --add-opens=java.base/java.lang.invoke=ALL-UNNAMED
-                        --add-opens=java.base/java.lang.reflect=ALL-UNNAMED
-                        --add-opens=java.base/java.io=ALL-UNNAMED
-                        --add-opens=java.base/java.net=ALL-UNNAMED
-                        --add-opens=java.base/java.nio=ALL-UNNAMED
-                        --add-opens=java.base/java.util=ALL-UNNAMED
-                        --add-opens=java.base/java.util.concurrent=ALL-UNNAMED
-                        --add-opens=java.base/sun.nio.ch=ALL-UNNAMED
-                        --add-opens=java.base/sun.security.action=ALL-UNNAMED
-                    </argLine>
+                    <argLine>${test.argLine}</argLine>
                 </configuration>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven.failsafe.plugin.version}</version>
+                <configuration>
+                    <argLine>${test.argLine}</argLine>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
 
             <plugin>

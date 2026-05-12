@@ -4,6 +4,9 @@ import org.apache.accumulo.core.data.Key;
 import org.apache.hadoop.io.Text;
 import org.apache.spark.Partitioner;
 
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -32,7 +35,13 @@ public final class TargetTablePartitioner extends Partitioner {
 
     private static final long serialVersionUID = 1L;
 
-    private final List<Text> splits;
+    /**
+     * Marked transient because {@link Text} does not implement {@link java.io.Serializable}.
+     * The custom {@link #writeObject} / {@link #readObject} hooks below ship and rebuild this
+     * field via Text's raw UTF-8 bytes — that is what Spark uses to send the partitioner from
+     * the driver to executors.
+     */
+    private transient List<Text> splits;
 
     /**
      * @param splits target table split points; copied and sorted defensively. May be empty
@@ -40,12 +49,16 @@ public final class TargetTablePartitioner extends Partitioner {
      */
     public TargetTablePartitioner(List<Text> splits) {
         Objects.requireNonNull(splits, "splits");
-        List<Text> copy = new ArrayList<>(splits.size());
-        for (Text s : splits) {
+        this.splits = sortedDefensiveCopy(splits);
+    }
+
+    private static List<Text> sortedDefensiveCopy(List<Text> in) {
+        List<Text> copy = new ArrayList<>(in.size());
+        for (Text s : in) {
             copy.add(new Text(Objects.requireNonNull(s, "split element")));
         }
         Collections.sort(copy);
-        this.splits = Collections.unmodifiableList(copy);
+        return Collections.unmodifiableList(copy);
     }
 
     @Override
@@ -56,7 +69,10 @@ public final class TargetTablePartitioner extends Partitioner {
     @Override
     public int getPartition(Object o) {
         Text row;
-        if (o instanceof Key k) {
+        if (o instanceof SerializableKey sk) {
+            // Spark's MigrationJob shuffle key — the common production path.
+            row = sk.getRow();
+        } else if (o instanceof Key k) {
             row = k.getRow();
         } else if (o instanceof Text t) {
             row = t;
@@ -64,12 +80,38 @@ public final class TargetTablePartitioner extends Partitioner {
             row = new Text(s);
         } else {
             throw new IllegalArgumentException(
-                    "TargetTablePartitioner expects a Key/Text/String, got " + o.getClass().getName());
+                    "TargetTablePartitioner expects a SerializableKey/Key/Text/String, got "
+                            + o.getClass().getName());
         }
         // Collections.binarySearch returns the match index when found, or
         // -(insertion_point) - 1 when not. Insertion point = number of splits < row,
         // which is exactly the partition index for row > splits[ip-1] (and < splits[ip] if any).
         int idx = Collections.binarySearch(splits, row);
         return idx >= 0 ? idx : -(idx + 1);
+    }
+
+    private void writeObject(ObjectOutputStream out) throws IOException {
+        out.defaultWriteObject();
+        out.writeInt(splits.size());
+        for (Text t : splits) {
+            int len = t.getLength();
+            out.writeInt(len);
+            // Text.getBytes() may be over-sized; only the first getLength() bytes are valid.
+            out.write(t.getBytes(), 0, len);
+        }
+    }
+
+    private void readObject(ObjectInputStream in) throws IOException, ClassNotFoundException {
+        in.defaultReadObject();
+        int n = in.readInt();
+        List<Text> rebuilt = new ArrayList<>(n);
+        for (int i = 0; i < n; i++) {
+            int len = in.readInt();
+            byte[] bytes = new byte[len];
+            in.readFully(bytes);
+            rebuilt.add(new Text(bytes));
+        }
+        // Already in sorted order from the original instance — no need to re-sort.
+        this.splits = Collections.unmodifiableList(rebuilt);
     }
 }

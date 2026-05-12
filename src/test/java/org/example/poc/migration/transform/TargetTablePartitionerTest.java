@@ -4,6 +4,10 @@ import org.apache.accumulo.core.data.Key;
 import org.apache.hadoop.io.Text;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -99,6 +103,41 @@ class TargetTablePartitionerTest {
     void unknownInputType_isRejected() {
         TargetTablePartitioner p = new TargetTablePartitioner(List.of(new Text("m")));
         assertThrows(IllegalArgumentException.class, () -> p.getPartition(42));
+    }
+
+    @Test
+    void accepts_SerializableKey_thePathSparkActuallyUses() {
+        // MigrationJob's shuffle key is SerializableKey — this is the production code path.
+        TargetTablePartitioner p = new TargetTablePartitioner(List.of(new Text("m")));
+        assertEquals(0, p.getPartition(new SerializableKey(new Key(new Text("a")))));
+        assertEquals(1, p.getPartition(new SerializableKey(new Key(new Text("n")))));
+        assertEquals(0, p.getPartition(new SerializableKey(new Key(new Text("m")))));
+    }
+
+    @Test
+    void javaSerializationRoundTrip_preservesPartitionAssignments() throws Exception {
+        // Spark sends the partitioner from the driver to executors via Java serialization.
+        // Text is not Serializable, so this only works because of the writeObject/readObject
+        // hooks on TargetTablePartitioner — assert that path is intact.
+        TargetTablePartitioner original = new TargetTablePartitioner(
+                List.of(new Text("user-100"), new Text("user-200"), new Text("user-300")));
+
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try (ObjectOutputStream out = new ObjectOutputStream(baos)) {
+            out.writeObject(original);
+        }
+        TargetTablePartitioner roundTripped;
+        try (ObjectInputStream in = new ObjectInputStream(new ByteArrayInputStream(baos.toByteArray()))) {
+            roundTripped = (TargetTablePartitioner) in.readObject();
+        }
+
+        assertEquals(original.numPartitions(), roundTripped.numPartitions());
+        for (String row : List.of("user-042", "user-100", "user-150", "user-200",
+                                   "user-250", "user-300", "user-999")) {
+            assertEquals(original.getPartition(keyForRow(row)),
+                    roundTripped.getPartition(keyForRow(row)),
+                    "partition assignment must survive Java serialization for row=" + row);
+        }
     }
 
     @Test
