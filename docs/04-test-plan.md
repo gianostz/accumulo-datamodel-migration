@@ -4,7 +4,7 @@
 
 Define the tests that demonstrate the PoC is working and the verifications that attest to the consistency of the migrated data. The plan is structured across 3 levels:
 
-1. **Unit tests**: isolated components (transformation, partitioner, key construction).
+1. **Unit tests**: isolated components (transformation, key construction, output format wiring).
 2. **Integration tests**: end-to-end on MiniAccumuloCluster with a small dataset (~100 events).
 3. **Full PoC execution**: standard dataset (~10,000 events), 2 waves, complete consistency checks.
 
@@ -30,22 +30,25 @@ Define the tests that demonstrate the PoC is working and the verifications that 
 **When** `pad(MAX_LONG - t)` is computed for both  
 **Then** the string for `t2` sorts lexicographically BEFORE the string for `t1` (descending temporal order).
 
-### UT-4 — TargetTablePartitioner: Correct Distribution
-**Given** a set of split points and a set of Keys falling within each interval  
-**When** the partitioner is applied  
-**Then** each Key falls in the correct partition (= index of the target tablet).
+### UT-4 — *Removed*
+The custom `TargetTablePartitioner` was removed when the write path switched to `AccumuloFileOutputFormat` (see architecture §5.2). UT-4 is gone with it; the only remaining numbered slot is preserved for traceability.
 
 ### UT-5 — RFile Round-Trip
 **Given** a set of N ordered `(Key, Value)` pairs  
 **When** an RFile is written and then read back  
 **Then** the same N pairs are obtained in the same order.
 
-### UT-6 — Static Verification of Accumulo Client Bypass
+### UT-6 — Static Verification of NFR-4
 **Given** the classes in package `org.example.poc.migration.transform..`  
 **When** their imports are inspected  
-**Then** no references to `Scanner`, `BatchScanner`, `BatchWriter`, `AccumuloClient`, or any type under `org.apache.accumulo.core.client..` / `org.apache.accumulo.core.clientImpl..` are present.
+**Then** no references to `BatchScanner`, `BatchWriter`, or `AccumuloClient` are present. References to classes under `org.apache.accumulo.core.client..` / `clientImpl..` are similarly forbidden, with deliberate carve-outs for the static-file RFile API (`client.rfile..`, `client.Scanner`, `client.ScannerBase`). The new write-side `org.apache.accumulo.hadoop.mapreduce.AccumuloFileOutputFormat` is in a different package family and is explicitly permitted.
 
 **Implementation**: ArchUnit rule in `src/test/java/.../transform/ClientBypassArchTest.java`. The project is single-module (architecture §7), so this test is the binding enforcement of NFR-4 — it must fail the build if violated.
+
+### UT-7 — `AccumuloFileOutputFormat` Configuration
+**Given** the driver prepares a Hadoop `Configuration` by calling `AccumuloFileOutputFormat.configure().outputPath(...).store(job)` on a real `Job` object  
+**When** an `AccumuloFileOutputFormat` instance is asked for a `RecordWriter` against a `TaskAttemptContext` built from that `Configuration`  
+**Then** (a) the call returns a working `RecordWriter` that appends `(Key, Value)` pairs and produces a valid RFile on the configured output path, and (b) no `AccumuloClient`, `BatchScanner`, or `BatchWriter` is instantiated and no Zookeeper / TabletServer connection is opened during the call. Pure unit test — no `MiniAccumuloCluster`.
 
 ## 3. Integration Tests (Small Dataset, ~100 Events)
 
@@ -207,7 +210,7 @@ The wave report is a JSON file saved to `${paths.reportsDir}/wave-<N>-<timestamp
 
 The plan is considered **passed** if:
 
-1. All unit tests (UT-1 ... UT-6) are PASS.
+1. All unit tests (UT-1, UT-2, UT-3, UT-5, UT-6, UT-7) are PASS. (UT-4 is intentionally removed — see §2.)
 2. Integration tests IT-1, IT-2, IT-3, IT-4 are PASS.
 3. The full PoC execution on the standard dataset produces 2 reports (one per wave) with `overallOutcome: PASS`.
 4. All acceptance criteria from the Requirements Document (AC-1 ... AC-7) are satisfied.

@@ -9,7 +9,7 @@ Re-ingesting historical data through the Accumulo client (Scanner + BatchWriter)
 1. **High operational load on the production cluster**: every write goes through the TabletServer, write-ahead log, and subsequent compactions.
 2. **Extended execution time**: the write → flush → compaction pipeline is significantly slower than directly writing pre-sorted RFiles.
 
-The identified strategy consists of **transforming RFiles outside of Accumulo** (reading via `RFile.newReader()`, writing via `RFile.newWriter()`) and subsequently registering them into the target tables via **bulk import** (`TableOperations.importDirectory()`).
+The identified strategy consists of **transforming RFiles outside of the TabletServer write path** (reading via `RFile.newReader()`, writing via Accumulo's `AccumuloFileOutputFormat` from `accumulo-hadoop-mapreduce`) and subsequently registering them into the target tables via **bulk import** (`TableOperations.importDirectory()`). `AccumuloFileOutputFormat` is a thin Hadoop `OutputFormat` wrapper that ultimately delegates to the same static-file RFile writer, but is battle-tested for block sizing, compression, and version handling.
 
 ## 2. PoC Objective
 
@@ -48,12 +48,13 @@ The system must be able to generate a dataset of N synthetic events (configurabl
 The system must be able to identify the physical RFiles associated with the source table (by reading the `accumulo.metadata` table or forcing a compaction to obtain a known set of files).
 
 ### FR-3 — External Transformation
-The system must read source RFiles using `RFile.newReader()` (without a client connection to the Accumulo cluster during transformation), deserialize the events, and produce 5 sets of RFiles (one per target table) using `RFile.newWriter()`.
+The system must read source RFiles using `RFile.newReader()` (without routing data through Accumulo TabletServers during transformation), deserialize the events, and produce 5 sets of RFiles (one per target table) by emitting `(Key, Value)` pairs through `AccumuloFileOutputFormat` (which itself delegates to the static-file RFile writer).
 
 ### FR-4 — Compliance of Produced RFiles
 The produced RFiles must comply with Accumulo format constraints, in particular:
 - Keys sorted according to Accumulo ordering (rowId, cf, cq, vs, ts descending).
-- Alignment to the split points of the target tables (an RFile must not cross tablet boundaries where possible).
+
+Alignment of produced RFiles to target-table split points is **not** required: `TableOperations.importDirectory()` accepts RFiles that span tablet boundaries and will internally re-split them at import time. The PoC accepts the (small) bulk-import cost of on-the-fly re-splits in exchange for a substantially simpler Spark write path. Aligning RFiles to splits is a future optimisation, not a correctness requirement.
 
 ### FR-5 — Bulk Import
 The system must register the produced RFiles into the target tables via `TableOperations.importDirectory()`.
@@ -85,8 +86,10 @@ The PoC execution must be fully automated via script (single entry-point command
 ### NFR-3 — Transformation Idempotency
 Transforming a source event must produce deterministic keys in the target tables. Re-running the transformation on the same input must produce byte-identical output.
 
-### NFR-4 — Bypass of the Accumulo Client During Transformation
-During the data transformation phase (source read, output generation), the code **must not** use `Scanner`, `BatchScanner`, `BatchWriter`, or any other client APIs that require an active connection to the Accumulo cluster. The only permitted APIs are `RFile.newReader()` and `RFile.newWriter()` (plus the underlying filesystem APIs). The Accumulo client is permitted only for the setup phase (table creation, split definition), bulk import (`importDirectory()`), and final verification.
+### NFR-4 — No TabletServer Traffic During Transformation
+The transformation must not route data through Accumulo TabletServers. `Scanner`, `BatchScanner`, and `BatchWriter` are forbidden during transformation. Read-only metadata access (e.g., split point queries) is permitted. The Accumulo client is permitted for setup, split reads, bulk import, and verification.
+
+Concretely, the static-file RFile API (`RFile.newReader()` / `RFile.newWriter()`) and the Hadoop OutputFormat that wraps it (`org.apache.accumulo.hadoop.mapreduce.AccumuloFileOutputFormat`) are both allowed — neither opens a TabletServer connection. The narrow read-side carve-out for `org.apache.accumulo.core.client.Scanner` (the return type of `RFile.newScanner().build()`) remains, since that `Scanner` is bound to an RFile path, not to a cluster.
 
 ### NFR-5 — Technology
 The transformation job must be implemented using **Apache Spark in local[*] mode**. Motivation and comparison with alternatives (MapReduce) are in the Architecture Document.
@@ -108,7 +111,7 @@ The PoC is considered **passed** if, at the end of the complete execution (2 wav
 | AC-3 | Semantic round-trip successful for 100% of the verification sample (sample ≥ 5% of dataset)            | 0 mismatches                        |
 | AC-4 | Referential integrity at 100%                                                                           | 0 orphan eventIds                   |
 | AC-5 | Source aggregate checksum = `events_by_id` aggregate checksum                                          | Identical hashes                    |
-| AC-6 | The transformation code does not import or use `Scanner`/`BatchWriter`                                 | Static code verification            |
+| AC-6 | The transformation code does not use `BatchScanner`, `BatchWriter`, or `AccumuloClient` during transformation. Read-only metadata access via `AccumuloFileOutputFormat` is permitted. | Static code verification            |
 | AC-7 | Wave reports are generated and contain all required metrics                                             | Presence of report files            |
 
 ## 7. Constraints and Assumptions

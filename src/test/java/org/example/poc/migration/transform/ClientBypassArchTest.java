@@ -13,13 +13,18 @@ import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
  * UT-6 — Binding enforcement of NFR-4 (architecture §5.1, CLAUDE.md invariant 1).
  *
  * <p>Classes under {@code org.example.poc.migration.transform..} execute inside Spark
- * {@code flatMap} / {@code mapPartitions} closures. They are only allowed to touch the static
- * RFile read/write API and Hadoop {@code FileSystem}. Any reference to the Accumulo client
- * API that opens a cluster connection silently breaks the bypass guarantee that justifies
- * the whole PoC, so the build must fail the moment one appears.
+ * {@code flatMap} / {@code mapPartitions} closures. They are only allowed to touch:
+ * <ul>
+ *   <li>the static RFile read API and Hadoop {@code FileSystem} (for the source-read path);</li>
+ *   <li>{@code org.apache.accumulo.hadoop.mapreduce.AccumuloFileOutputFormat} (the new write
+ *       path) — already outside the banned namespace, see below.</li>
+ * </ul>
+ * Any reference to the Accumulo client API that opens a TabletServer connection silently
+ * breaks the bypass guarantee that justifies the whole PoC, so the build must fail the moment
+ * one appears.
  *
  * <h3>Carve-outs (deliberately narrow)</h3>
- * The PoC must use {@code RFile.newScanner()} / {@code RFile.newWriter()} (FR-3, NFR-4).
+ * The PoC reads source RFiles with {@code RFile.newScanner()} (FR-3, NFR-4).
  * In Accumulo 2.1.x the public static-file API is exposed under
  * {@code org.apache.accumulo.core.client.rfile} and {@code RFile.newScanner().build()} returns
  * a {@code org.apache.accumulo.core.client.Scanner} bound to an RFile, not to a cluster.
@@ -31,6 +36,12 @@ import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
  * </ul>
  * The cluster-connecting types {@code BatchScanner}, {@code BatchWriter}, and
  * {@code AccumuloClient} remain banned by name as defense-in-depth.
+ *
+ * <p>{@code AccumuloFileOutputFormat} (and the rest of {@code accumulo-hadoop-mapreduce})
+ * lives in {@code org.apache.accumulo.hadoop..}, outside the banned
+ * {@code accumulo.core.client..} / {@code clientImpl..} namespace, so it is permitted
+ * unconditionally. We verified by disassembling Accumulo 2.1.2 that
+ * {@code AccumuloFileOutputFormat.getRecordWriter()} opens no cluster connection.
  *
  * <p>If a future class in {@code transform/} legitimately needs another type, prefer wrapping
  * it in a non-{@code transform/} helper rather than widening this carve-out.

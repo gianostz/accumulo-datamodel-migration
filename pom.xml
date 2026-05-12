@@ -75,6 +75,13 @@
             <version>${accumulo.version}</version>
         </dependency>
         <dependency>
+            <!-- AccumuloFileOutputFormat (under org.apache.accumulo.hadoop.mapreduce) — used by
+                 MigrationJob from Spark's saveAsNewAPIHadoopFile (architecture §2.4 / §5.2). -->
+            <groupId>org.apache.accumulo</groupId>
+            <artifactId>accumulo-hadoop-mapreduce</artifactId>
+            <version>${accumulo.version}</version>
+        </dependency>
+        <dependency>
             <groupId>org.apache.accumulo</groupId>
             <artifactId>accumulo-minicluster</artifactId>
             <version>${accumulo.version}</version>

@@ -69,14 +69,15 @@ Core of the PoC. A Spark job in local mode that:
 1. Receives as input the list of HDFS paths (or local files, in MiniAccumulo) of the source RFiles to process in the current wave.
 2. For each RFile, creates an `RFile.newScanner()` and emits `KeyValue` pairs into a distributed dataset.
 3. Applies a `flatMap` that, for each source `KeyValue`, produces a set of `(targetTable, newKey, newValue)` tuples according to the transformation rules (see Data Model Document).
-4. Partitions the dataset by `targetTable`.
+4. Filters the unified RDD per target table.
 5. For each target table:
-   - Retrieves the table's split points (passed as a parameter to the job, read by the driver).
-   - Repartitions and sorts by splits (custom `Partitioner`).
-   - Writes one RFile per partition via `RFile.newWriter()`, under the `staging/<targetTable>/` directory.
+   - Sorts the RDD by the natural Accumulo `Key` ordering (`sortByKey` on `(Key, Value)`).
+   - Calls `JavaPairRDD.saveAsNewAPIHadoopFile(staging/<targetTable>, Key.class, Value.class, AccumuloFileOutputFormat.class, hadoopConf)`.
 
-**Critical constraint**: inside Spark `flatMap` / `mapPartitions`, the code has **no** access to any `AccumuloClient` instance. It works only with:
-- `RFile.newReader()` and `RFile.newWriter()` APIs (static, operating on Hadoop `FileSystem`)
+`AccumuloFileOutputFormat` (from `org.apache.accumulo.hadoop.mapreduce`) is a Hadoop `OutputFormat<Key, Value>` that opens one RFile per task at `getDefaultWorkFile()` and writes via the same static RFile writer the PoC used previously. The driver configures block sizes / compression / sampler on the Hadoop `Configuration` once (via `AccumuloFileOutputFormat.configure().outputPath(...).store(job)`); inside executors, `getRecordWriter()` reads only that `Configuration` — no Accumulo client, no TabletServer traffic, no Zookeeper lookup.
+
+**Critical constraint**: inside Spark `flatMap` / `mapPartitions`, the code has **no** access to any `AccumuloClient`, `BatchScanner`, or `BatchWriter`. It works only with:
+- `RFile.newReader()` (source read) and `AccumuloFileOutputFormat` (target write)
 - Pure transformation logic (JSON deserialization, construction of new `Key` objects)
 
 ### 2.5 `BulkImporter`
@@ -116,11 +117,12 @@ Coordinates the execution of a single wave (components 2.3 → 2.7) and produces
                           ▼
               ┌─────────────────────┐
               │  Spark Driver       │
-              │  (reads target      │
-              │   table split pts)  │
+              │  (builds Hadoop     │
+              │   Configuration via │
+              │   AFOF.configure()) │
               └─────────────────────┘
                           │
-                          │ broadcast split points
+                          │ Hadoop Configuration (one per table)
                           ▼
               ┌─────────────────────────────────────────────┐
               │  Spark Executors (local[*])                  │
@@ -136,23 +138,19 @@ Coordinates the execution of a single wave (components 2.3 → 2.7) and produces
               │                        │                     │
               │                        ▼                     │
               │            ┌──────────────────────┐          │
-              │            │ partitionBy:         │          │
-              │            │ (targetTable, key)   │          │
+              │            │ per target table:    │          │
+              │            │ filter + sortByKey   │          │
               │            └──────────────────────┘          │
               │                        │                     │
               │                        ▼                     │
-              │            ┌──────────────────────┐          │
-              │            │ sortWithinPartition  │          │
-              │            └──────────────────────┘          │
-              │                        │                     │
-              │                        ▼                     │
-              │            ┌──────────────────────┐          │
-              │            │ RFile.newWriter()    │          │
-              │            │ per partition        │          │
-              │            └──────────────────────┘          │
+              │            ┌──────────────────────────────┐  │
+              │            │ saveAsNewAPIHadoopFile +     │  │
+              │            │ AccumuloFileOutputFormat     │  │
+              │            │ (one RFile per task)         │  │
+              │            └──────────────────────────────┘  │
               └─────────────────────────────────────────────┘
                           │
-                          │ staging/<table>/part-*.rf
+                          │ staging/<table>/part-r-*.rf
                           ▼
               ┌─────────────────────┐
               │  BulkImporter       │
@@ -211,7 +209,11 @@ This section documents the rationale for the choice required by NFR-5.
 | Memory footprint on single-node         | Higher                      | Lower                      |
 | PoC development time                    | Faster                      | Slower                     |
 
-### 4.4 Conclusion
+### 4.4 Use of `AccumuloFileOutputFormat` from Spark
+
+The write side of the transformation uses `org.apache.accumulo.hadoop.mapreduce.AccumuloFileOutputFormat` — a Hadoop `OutputFormat` originally written for MapReduce — driven from Spark via the Hadoop OutputFormat compatibility layer (`JavaPairRDD.saveAsNewAPIHadoopFile(...)`). This is intentional: the OutputFormat is a thin, battle-tested wrapper around the static-file RFile writer that handles compression, block sizing, sampler/summariser configuration, and the Hadoop work-file / commit lifecycle correctly. Reimplementing those concerns in a Spark `mapPartitions` writer means rediscovering edge cases under incidents. Spark gives us the expressive transformation; Accumulo's `OutputFormat` gives us the well-trodden write path. The PoC keeps both.
+
+### 4.5 Conclusion
 
 **Spark in local[*] mode is chosen** for the PoC, with the following dominant motivations:
 
@@ -224,23 +226,27 @@ MapReduce remains a valid and potentially preferable choice in production at ver
 
 ## 5. Critical Design Choices
 
-### 5.1 Bypass of the Accumulo Client During Transformation
+### 5.1 No TabletServer Traffic During Transformation
 
-The NFR-4 constraint (no Scanner/BatchWriter in the transformation) is implemented as follows:
+NFR-4 is now scoped to TabletServer traffic, not the Accumulo client surface as a whole. Read-only metadata access (e.g. split-point queries via `client.tableOperations().listSplits()`) is permitted; cluster writes via `BatchWriter` and bulk reads via `BatchScanner` remain forbidden during transformation. The constraint is implemented as follows:
 
-- **Reading**: use `org.apache.accumulo.core.file.rfile.RFile.newScanner()` (2.1.x signature). This API is static, accepts the RFile path, a Hadoop `FileSystem`, and a `Configuration` as parameters. It opens no connection to the cluster.
-- **Writing**: similarly, `RFile.newWriter()` accepts path + FileSystem + Configuration. Accumulo `Key` and `Value` objects are simple serializable POJOs and do not require the client.
-- **Architectural boundary**: the project is a **single Maven module** (see §7). The bypass is enforced at the **package** level: classes in `org.example.poc.migration.transform.*` (executed inside Spark `flatMap` / `mapPartitions`) must not depend on `org.apache.accumulo.core.client.*`, `org.apache.accumulo.core.clientImpl.*`, or any `Scanner` / `BatchScanner` / `BatchWriter` / `AccumuloClient` type. This is enforced by an ArchUnit rule wired into UT-6, which fails the build if a forbidden import appears in any `transform/*` class.
+- **Reading**: use `org.apache.accumulo.core.client.rfile.RFile.newScanner()` (2.1.x signature). This API is static, accepts the RFile path, a Hadoop `FileSystem`, and a `Configuration` as parameters. It opens no connection to the cluster.
+- **Writing**: use `org.apache.accumulo.hadoop.mapreduce.AccumuloFileOutputFormat`, a Hadoop `OutputFormat<Key, Value>`. Its `getRecordWriter()` reads only the Hadoop `Configuration` (for block size, compression, sampler) and opens an RFile writer at the task's default work file. We verified by disassembling `AccumuloFileOutputFormat.getRecordWriter()` in Accumulo 2.1.2 that no `AccumuloClient` is instantiated and no Zookeeper / TabletServer connection is opened. `Key` and `Value` are simple serializable POJOs.
+- **Architectural boundary**: the project is a **single Maven module** (see §7). The bypass is enforced at the **package** level: classes in `org.example.poc.migration.transform.*` (executed inside Spark `flatMap` / `mapPartitions`) must not depend on `BatchScanner`, `BatchWriter`, or `AccumuloClient`. Classes under `org.apache.accumulo.core.client..` / `clientImpl..` remain banned, with deliberate carve-outs for the static-file RFile API (`client.rfile..`, `client.Scanner`, `client.ScannerBase`). The new write-side type `org.apache.accumulo.hadoop.mapreduce.AccumuloFileOutputFormat` is in a different package (`accumulo.hadoop..`) and therefore not in scope of the original ban — it is allowed unconditionally. The ArchUnit rule in UT-6 fails the build if a forbidden type leaks into `transform/`.
 
 The Accumulo client APIs are used only by classes outside the `transform/` package (setup, bulk import, verification, cleanup), invoked from the driver — never from executor-side code.
 
-### 5.2 Spark Partitioning Aligned to Target Table Splits
+### 5.2 Spark Partitioning
 
-For each target table, the driver reads split points with `client.tableOperations().listSplits(tableName)`. The splits are passed as broadcast variables to the executors.
+The PoC does **not** align Spark output partitions to target-table split points. For each target table the job:
 
-A custom Spark `Partitioner` is implemented that, given an Accumulo `Key`, computes the correct partition according to the splits. The number of partitions per target table = (number of splits) + 1.
+1. Filters the unified RDD down to entries for that table.
+2. Calls `sortByKey()` on the natural Accumulo `Key` ordering. This produces an RDD partitioned by Spark's sample-based `RangePartitioner` (Spark's own, not Accumulo's) — partition boundaries reflect the data distribution, not the target tablet split points.
+3. Writes via `saveAsNewAPIHadoopFile(staging/<table>, ..., AccumuloFileOutputFormat.class, hadoopConf)`. Each task produces one RFile.
 
-**Rationale**: without this alignment, each produced RFile might contain keys belonging to multiple tablets of the target table. At bulk import time, Accumulo would have to **split each RFile on the fly** to align it to tablets — an expensive operation that defeats the purpose of bulk import. With aligned partitioning, each produced RFile falls entirely within one tablet → efficient bulk import.
+`AccumuloFileOutputFormat` itself does **not** handle split alignment — we verified this by disassembling Accumulo 2.1.2: its public API only exposes block size, compression, replication, sampler, and summariser configuration. Split alignment in the MapReduce world is the responsibility of a separate `KeyRangePartitioner` configured at the `Job` level, which Spark's `saveAsNewAPIHadoopFile` does not invoke.
+
+**Consequence and rationale**: produced RFiles may cross tablet boundaries of the target table. `TableOperations.importDirectory()` accepts such RFiles and **re-splits them on the fly at import time**. This is a non-zero cost, but at PoC scale (10k–100k events) the cost is small. The PoC explicitly trades a fully aligned write path for a substantially simpler Spark job (no custom partitioner, no broadcast of split arrays, no per-table partitioner-driven shuffle). Aligning RFiles to splits is a future optimisation — a Spark-side adapter wrapping Accumulo's `KeyRangePartitioner` (or our own thin equivalent), driven from `repartitionAndSortWithinPartitions`. It is not a correctness requirement (FR-4 was relaxed accordingly).
 
 ### 5.3 Key Ordering in Produced RFiles
 
@@ -270,9 +276,9 @@ Between waves, the corresponding range is deleted from the source table. This co
 
 ### 6.1 RFiles Produced with Unordered Keys
 
-**Risk**: Spark's `sortWithinPartitions` sorts according to the natural object comparator, which for Accumulo `Key` is already correct — but it is easy to get the partitioning key wrong and end up with an incorrect sort.
+**Risk**: Accumulo `RFile.append()` throws if keys are written out of order, so any disorder in the RDD partition handed to `AccumuloFileOutputFormat` aborts the task.
 
-**Mitigation**: the Spark key is `(targetTable, Key)`; the partitioner uses only `targetTable` to choose the partition, but the internal sort uses the natural ordering of `Key`. Dedicated unit test.
+**Mitigation**: per target table, the job applies `sortByKey()` on the natural Accumulo `Key` ordering immediately before `saveAsNewAPIHadoopFile`. The `(Key, Value)` pair RDD already uses `Key`'s `WritableComparable` ordering. Out-of-order failure would surface immediately at write time, not silently corrupt the output.
 
 ### 6.2 Partial Bulk Import Failure (One or More of 5 Tables)
 
@@ -296,9 +302,9 @@ In production, a more sophisticated rollback mechanism will be evaluated (e.g., 
 
 ### 6.5 Split Points Not Representative of the Dataset
 
-**Risk**: with wrong split points, Spark partitions are unbalanced and/or produced RFiles cover multiple tablets.
+**Risk**: with wrong split points, target tablets are unbalanced; produced RFiles (which are not split-aligned — see §5.2) will trigger more re-splits at bulk-import time.
 
-**Mitigation**: split points are calculated by the `DatasetGenerator` based on the actual distribution of the generated data (e.g., medians on key fields). Setup installs them on the target tables before import.
+**Mitigation**: split points are calculated by the `DatasetGenerator` based on the actual distribution of the generated data (e.g., medians on key fields). Setup installs them on the target tables before import. The PoC tolerates non-aligned RFiles by design — bulk import handles the re-split — so this risk degrades performance, not correctness.
 
 ## 7. Project Structure
 
@@ -319,7 +325,7 @@ poc-migration/
 │   ├── env/        EnvironmentSetup.java
 │   ├── data/       DatasetGenerator.java, Event.java, EventSerializer.java
 │   ├── locate/     SourceRFileLocator.java
-│   ├── transform/  MigrationJob.java, EventTransformer.java, TargetTablePartitioner.java
+│   ├── transform/  MigrationJob.java, EventTransformer.java
 │   ├── ingest/     BulkImporter.java
 │   ├── verify/     ConsistencyVerifier.java, VerificationReport.java
 │   ├── clean/      SourceCleaner.java
@@ -375,9 +381,10 @@ paths {
 ## 9. Main Dependencies (Indicative Versions)
 
 - `accumulo-core` 2.1.2
+- `accumulo-hadoop-mapreduce` 2.1.2 (contains `AccumuloFileOutputFormat` under `org.apache.accumulo.hadoop.mapreduce..`)
 - `accumulo-minicluster` 2.1.2
 - `hadoop-client` (version compatible with Accumulo 2.1.2; 3.3.x)
-- `spark-core` 3.5.x with appropriate scope
+- `spark-core` 3.5.x with appropriate scope (provides `saveAsNewAPIHadoopFile` / Hadoop OutputFormat compatibility)
 - `jackson-databind` for JSON
 - `slf4j-api` + `logback-classic`
 - `junit-jupiter` for tests

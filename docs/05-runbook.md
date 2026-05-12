@@ -188,7 +188,7 @@ Removes:
 ```bash
 java -cp target/accumulo-rfile-migration-1.0.0-SNAPSHOT-shaded.jar \
   org.apache.accumulo.core.file.rfile.PrintInfo \
-  --dump /tmp/poc-staging/events_by_id/part-00001.rf
+  --dump /tmp/poc-staging/events_by_id/part-r-00000.rf
 ```
 
 `scripts/inspect-results.sh` wraps this for all `*.rf` files in the staging dir.
@@ -216,7 +216,7 @@ Once the base PoC is validated, useful experiments:
 
 - **Increase the dataset**: set `dataset.totalEvents` to 100k, 1M, to measure single-node scalability.
 - **Vary the number of waves**: 4, 8 waves to measure setup overhead vs pure throughput.
-- **Disable split-aligned partitioning**: compare bulk import times with and without split alignment (must be significantly slower without).
+- **Add split-aligned partitioning**: the current write path lets `importDirectory()` re-split RFiles on the fly (see architecture §5.2). Adding a Spark partitioner aligned to target splits should reduce bulk-import time — measure how much.
 - **Inject a simulated failure** in one of the imports to test IT-5.
 
 ## 10. Final Notes
