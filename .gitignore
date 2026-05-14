@@ -1,26 +1,8 @@
 target/
-*.class
-
-# IDE
+project/target/
+project/project/
+.bsp/
+.bloop/
+.metals/
 .idea/
-*.iml
-*.iws
-*.ipr
-.vscode/
-.project
-.classpath
-.settings/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Build
-.mvn/wrapper/maven-wrapper.jar
-dependency-reduced-pom.xml
-
-# Local PoC artifacts (mirrors paths in application.conf)
-/tmp/poc-*
-/tmp/mini-accumulo-*
-hs_err_pid*.log
-*.log
+*.class

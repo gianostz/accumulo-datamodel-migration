@@ -1,17 +1,16 @@
 <configuration>
-    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
-        <encoder>
-            <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
-        </encoder>
-    </appender>
+  <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{HH:mm:ss.SSS} %-5level - %msg%n</pattern>
+    </encoder>
+  </appender>
 
-    <logger name="org.apache.spark"      level="WARN"/>
-    <logger name="org.apache.hadoop"     level="WARN"/>
-    <logger name="org.apache.zookeeper"  level="WARN"/>
-    <logger name="org.apache.accumulo"   level="INFO"/>
-    <logger name="org.example.poc"       level="INFO"/>
+  <!-- Silence verbose Accumulo / Hadoop / ZooKeeper output -->
+  <logger name="org.apache.accumulo" level="WARN"/>
+  <logger name="org.apache.hadoop"   level="WARN"/>
+  <logger name="org.apache.zookeeper" level="WARN"/>
 
-    <root level="INFO">
-        <appender-ref ref="STDOUT"/>
-    </root>
+  <root level="INFO">
+    <appender-ref ref="STDOUT"/>
+  </root>
 </configuration>
