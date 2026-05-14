@@ -16,11 +16,12 @@ object RFileLocator:
   def getFiles(client: AccumuloClient, tableName: String): Seq[String] =
     val tableId = client.tableOperations().tableIdMap().get(tableName)
 
-    // Metadata rows for a table are keyed as "<tableId>;<endRow>".
-    // Range("<tableId>;", "<tableId><") covers all tablets because '<' (0x3C) > ';' (0x3B).
+    // Metadata tablet rows are "<tableId>;<endRow>" for split tablets and
+    // "<tableId><" for the default (null end-row) tablet. Since ';' (0x3B) < '<' (0x3C),
+    // the inclusive range ["<tableId>;", "<tableId><"] covers every tablet of the table.
     val scanner = client.createScanner(MetadataTable.NAME, new Authorizations())
     scanner.fetchColumnFamily(new Text("file"))
-    scanner.setRange(new ARange(tableId + ";", true, tableId + "<", false))
+    scanner.setRange(new ARange(tableId + ";", true, tableId + "<", true))
 
     // In Accumulo 2.1.x the 'file' column qualifier is a serialized StoredTabletFile,
     // not a bare path — StoredTabletFile.getPathStr() yields the full absolute URI.
